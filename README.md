@@ -19,12 +19,19 @@ I ran [this pipeline](https://github.com/momsane/16S_PacBio_dada2) without any p
 ## Results
 
 - **Raw reads to final ASV table read retention**: on average, using maxEE=4, 73% of raw reads make it through.
+![reads histogram](./analysis_plots/04_read_number_hist.svg)
+
 - **Genome equivalents to reads relationship**: it seems that genome_depth=0.276*reads_after_tax. This was expected since most bacteria in the SynCom have 3-4 16S rRNA copies. This means that for instance with 20k raw reads, you would get about 4k genome equivalents at the end.
+![reads to genome equivalents plot](./analysis_plots/read_genomes_counts.svg)
+
 - **Detection of most abundant taxa**: 20k raw reads or 4k genome equivalents (first vertical dashed line in the curves) seems to be enough to detect the most abundant taxa.
+![strain abundance curves](./analysis_plots/strain_ab_subsamples.svg)
+
 - **Rare/low abundance taxa**: it also seems that some strains colonize at very low abundance, *i.e.* Commensalibacter, Bartonella, some Gilliamella and some Bifidobacteria. So if detecting those is needed, a lot more reads are required. However this will come with several downsides:
     - Having enough reads in the beginning: to get say 20k genome equivalents at the end you need at least 100k raw reads for each of your samples. You might end up having to discard many samples that don't meet this requirement
     - Computation then becomes much heavier, in particular for the denoising step which is the main bottleneck. For example, with 150 samples starting at around 60k reads each, denoising on 4 CPUs requires 64G of RAM and runs for 12h.
     - Even if you have those 100k reads, those taxa would still have <10 reads, so your estimation of relative abundance will be very noisy.
+![strain abundance curves](./analysis_plots/strain_ab_subsamples_classified_zoom.svg)
 
 ## Conclusion
 

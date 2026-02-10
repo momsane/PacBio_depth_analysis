@@ -30,7 +30,7 @@ if(!require(GUniFrac)){
   library(GUniFrac)
 }
 
-root <- "/Volumes/RECHERCHE/FAC/FBM/DMF/pengel/general_data/D2c/mgarcia/20240708_mgarcia_syncom_assembly/pacbio_analysis/depth_analysis"
+root <- "../.."
 input.strains <- file.path(root, "results", "quantify_strains", "strain_quantification_matrix_count.tsv")
 input.readcounts <- file.path(root, "results", "assign_taxonomy", "read_count_wide.tsv")
 input.pal <- file.path(root, "results", "quantify_strains", "color_palette.tsv")
