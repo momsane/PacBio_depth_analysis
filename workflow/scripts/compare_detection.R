@@ -393,8 +393,17 @@ ggsave(file.path(out.plots, "strain_ab_subsamples_classified.pdf"), strain_ab_su
 ggsave(file.path(out.plots, "strain_ab_subsamples_classified_zoom.pdf"), strain_ab_subsamples4, device="pdf", width = 12, height = 10)
 
 write.table(
-  subsamples,
-  file.path(out.comp, "subsamples_table.tsv"),
+  strain_counts,
+  file.path(out.comp, "strain_read_counts.tsv"),
+  sep = "\t",
+  col.names = T,
+  row.names = F,
+  quote = F
+)
+
+write.table(
+  lms,
+  file.path(out.comp, "linear_models.tsv"),
   sep = "\t",
   col.names = T,
   row.names = F,
