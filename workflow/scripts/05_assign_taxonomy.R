@@ -1,0 +1,579 @@
+# Load required libraries
+
+if(!require(dplyr)){
+  install.packages(pkgs = 'dplyr', repos = 'https://stat.ethz.ch/CRAN/')
+  library(dplyr)
+}
+
+if(!require(tidyr)){
+  install.packages(pkgs = 'tidyr', repos = 'https://stat.ethz.ch/CRAN/')
+  library(tidyr)
+}
+
+if(!require(readr)){
+  install.packages(pkgs = 'readr', repos = 'https://stat.ethz.ch/CRAN/')
+  library(readr)
+}
+
+if(!require(stringr)){
+  install.packages(pkgs = 'stringr', repos = 'https://stat.ethz.ch/CRAN/')
+  library(stringr)
+}
+
+if(!require(ggplot2)){
+  install.packages(pkgs = 'ggplot2', repos = 'https://stat.ethz.ch/CRAN/')
+  library(ggplot2)
+}
+
+if(!require(rlang)){
+  install.packages(pkgs = 'rlang', repos = 'https://stat.ethz.ch/CRAN/')
+  library(rlang)
+}
+
+if(!require(dada2)){
+  if(!require(devtools)){
+    install.packages(pkgs = 'devtools', repos = 'https://stat.ethz.ch/CRAN/')
+  }
+  devtools::install_github("benjjneb/dada2") # installing through GitHub to get latest updates
+  library(dada2)
+}
+
+if(!require(GUniFrac)){
+  install.packages(pkgs = 'GUniFrac', repos = 'https://stat.ethz.ch/CRAN/')
+  library(GUniFrac)
+}
+
+if(!require(Biostrings)){
+  install.packages(pkgs = 'Biostrings', repos = 'https://stat.ethz.ch/CRAN/')
+  library(Biostrings)
+}
+
+if(!require(phyloseq)){
+  if(!requireNamespace("BiocManager")){
+    install.packages("BiocManager")
+  }
+  BiocManager::install("phyloseq")
+  library(phyloseq)
+}
+
+if(!require(fantaxtic)){
+  if(!require(devtools)){
+    install.packages(pkgs = 'devtools', repos = 'https://stat.ethz.ch/CRAN/')
+    library(devtools)
+  }
+  devtools::install_github("gmteunisse/fantaxtic")
+  library(fantaxtic)
+}
+
+if(!require(ggnested)){
+  if(!require(devtools)){
+    install.packages(pkgs = 'devtools', repos = 'https://stat.ethz.ch/CRAN/')
+    library(devtools)
+  }
+  devtools::install_github("gmteunisse/ggnested")
+  library(ggnested)
+}
+
+# Collect arguments
+
+args <- commandArgs(trailingOnly = TRUE)
+
+if (length(args) != 10){
+  stop(" Usage: 05_assign_taxonomy.R <ASV_table> <metadata_table.tsv> <read_count_table> <db_tax> <db_species> <rarefy_to> <facet_var> <tax_results_dir> <plots_dir>", call.=FALSE)
+} else {
+  input.asvs <- args[1] # ASV table (no chimera)
+  input.metadata <- args[2] # sample metadata table, tab-separated, first column is the the sample name
+  input.readcounts <- args[3]
+  db1 <- args[4] # taxonomy database for assignTaxonomy (GreenGenes2, SILVA, or custom)
+  db2 <- args[5] # taxonomy database for addSpecies (SILVA or custom), put "" if not needed
+  min_boot <- args[6] # numerical threshold to retain taxonomic assignment
+  rarefy_to <- args[7] # number of reads to rarefy to; if <=0, no rarefaction
+  facet_var <- args[8] # one column in the metadata table to facet the taxonomy plot, put "" if not needed
+  out.tax <- args[9] # folder to write denoising results
+  out.plots <- args[10] # folder to write plots
+}
+
+# root <- "/Volumes/RECHERCHE/FAC/FBM/DMF/pengel/general_data/D2c/mgarcia/20240708_mgarcia_syncom_assembly/pacbio_analysis/run1_bees"
+# input.asvs <- file.path(root, "results", "denoising", "ASV_samples_table_noChim.rds")
+# input.metadata <- file.path(root, "workflow", "config", "metadata.tsv")
+# input.readcounts <- file.path(root, "results", "denoising", "read_counts_steps.tsv")
+# db1 <- file.path(root, "data", "databases", "amplicon_based_db/syncom_custom_db_toSpecies_trainset.fa")
+# db2 <- file.path(root, "data", "databases", "amplicon_based_db/syncom_custom_db_addSpecies.fa")
+# min_boot <- 50
+# rarefy_to <- -1
+# facet_var <- "SampleType"
+# out.tax <- file.path(root, "results", "assign_taxonomy")
+# out.plots <- file.path(root, "plots")
+
+rank_names <- c("Kingdom", "Phylum", "Class", "Family", "Order", "Genus", "Species", "Strain", "Cluster")
+if (facet_var %in% rank_names){
+  cat("Error: the provided facet_var is conflicting with taxonomic rank names! Please change the name of this variable before continuing.\n")
+  quit(save="no")
+}
+
+### Create outdirs ###
+
+cat("\nCreating directories\n")
+
+dir.create(out.plots, recursive = TRUE, showWarnings = FALSE)
+dir.create(out.tax, recursive = TRUE, showWarnings = FALSE)
+
+### Inputs ###
+
+rarefy_to <- as.numeric(rarefy_to)
+min_boot <- as.numeric(min_boot)
+
+ASV_samples_table_noChim <- readRDS(input.asvs)
+meta <- as.data.frame(read_tsv(input.metadata, show_col_types = F))
+rownames(meta) = meta$SampleID
+
+reads_df <- read.table(input.readcounts, sep = "\t", header = T)
+
+### Rarefy reads if needed ###
+
+if (rarefy_to <= 0){
+  cat("No rarefaction\n")
+  ASV_samples_table_noChim2 <- ASV_samples_table_noChim
+} else {
+  # rarefy reads
+  cat(paste0("Rarefaction to ", rarefy_to, " reads; samples with fewer reads will be removed; ASVs with a subsequent total abundance of 0 will be removed\n"))
+  set.seed(42)
+  raref <- Rarefy(ASV_samples_table_noChim, depth = rarefy_to)
+  ASV_samples_table_noChim2 <- raref$otu.tab.rff 
+  # list samples that are removed
+  cat(paste0("Rarefaction removed the following samples: ", paste0(raref$discard, collapse = ", "), "\n"))
+  
+  # find ASVs with total abundance of 0
+  ab <- apply(ASV_samples_table_noChim2, 2, sum)
+  cat(paste0("Rarefaction led to ", length(names(ab[ab == 0])), " ASVs being removed\n"))
+  
+  # save these ASVs somewhere
+  seqs <- DNAStringSet(names(ab[ab == 0]))
+  names(seqs) <- seq_along(seqs)
+  writeXStringSet(seqs, file.path(out.tax, "ASV_removed_rarefaction.fna"), format="fasta")
+  
+  # remove the ASVs from table
+  ASV_samples_table_noChim2 <- ASV_samples_table_noChim2[ ,setdiff(colnames(ASV_samples_table_noChim2), names(ab[ab == 0]))]
+}
+
+### Assign taxonomy ###
+
+cat(paste0("Using database ", db1, " to assign taxonomy\n"))
+
+taxonomy_object <- assignTaxonomy(
+  seqs = ASV_samples_table_noChim2,
+  refFasta = db1,
+  minBoot = min_boot,
+  outputBootstraps = TRUE,
+  multithread = TRUE,
+  verbose = T)
+
+ASV_taxonomy <- taxonomy_object$tax
+bootstraps <- taxonomy_object$boot
+
+cat("\n")
+
+##### Custom function to assign species
+
+# addSpecies uses exact matches, including length matching
+# but in some cases either the reference sequence or the ASV could be a few nt shorter
+
+addSpecies_custom <- function(seqs, refFasta) {
+  # read inputs as DNAstrings
+  asvs <- DNAStringSet(colnames(seqs))
+  refs <- readDNAStringSet(refFasta)
+  # convert to character for comparison
+  asv_seqs <- as.character(asvs)
+  ref_seqs <- as.character(refs)
+  
+  # extract only the description of the ref sequences
+  full_headers <- names(refs)
+  ref_descriptions <- sub("^[^ ]+\\s+", "", full_headers)  # keep only text after first space character
+  
+  results <- data.frame(ASV = character(0), ASV_index= character(0), ref_match = character(0), stringsAsFactors = FALSE)
+  
+  for (i in seq_along(asv_seqs)) {
+    asv <- asv_seqs[i]
+    
+    # match if ASV is substring of reference or reference is substring of ASV
+    # + try the rev. complement
+    matched <- vapply(ref_seqs, function(ref) {
+      rc_ref <- rc(ref)
+      grepl(asv, ref, fixed = TRUE) ||
+        grepl(ref, asv, fixed = TRUE) ||
+        grepl(asv, rc_ref, fixed = TRUE) ||
+        grepl(ref, rc_ref, fixed = TRUE)
+    }, logical(1))
+    
+    if (any(matched)) {
+      matched_descriptions <- ref_descriptions[matched]
+      if (length(matched_descriptions) > 1){
+        cat(paste0("Found more than one exact match for ASV ", asv_name, "; not adding it to the results\n"))
+      } else {
+        temp_df <- data.frame(ASV = asv,
+                              ASV_index = i,
+                              ref_match = matched_descriptions,
+                              stringsAsFactors = FALSE)
+        results <- rbind(results, temp_df)
+      }
+    }
+  }
+  rownames(results) <- results$ASV
+  return(results[ ,-1])
+}
+
+if (db2 != ""){
+  cat(paste0("Using database ", db2, " to assign species\n"))
+  ASV_taxonomy2 <- addSpecies_custom(seqs = ASV_samples_table_noChim2, refFasta = db2) %>% 
+    separate(ref_match, into = c("Species_addSp", "Strain", "Cluster"), sep = "-", remove = T) %>% 
+    separate(Species_addSp, into = c("Genus_addSp", "Species_addSp"), sep = " ") %>% 
+    select(-"ASV_index")
+  
+  # merge with taxonomy from assignTaxonomy()
+  ASV_taxonomy3 <- transform(merge(ASV_taxonomy,ASV_taxonomy2,by=0,all=TRUE), row.names=Row.names, Row.names=NULL)
+  
+  # remove all prefixes (used in gg2)
+  ASV_taxonomy3[,colnames(ASV_taxonomy3)] <- lapply(
+    ASV_taxonomy3[,colnames(ASV_taxonomy3)],
+    gsub,
+    pattern = "d__|p__|c__|o__|f__|g__|s__",
+    replacement = ""
+  )
+  
+  # combine taxonomy from both functions
+  ASV_taxonomy3 <- ASV_taxonomy3 %>% 
+    mutate(Genus = if_else(!is.na(Genus_addSp),Genus_addSp,Genus)) %>% # overwriting genus with genus from addSpecies if there is a hit
+    mutate(Species = if_else(!is.na(Genus_addSp),Species_addSp,Species)) %>% # overwriting species with species from addSpecies if there is a hit
+    mutate(Species_full = case_when(
+      is.na(Genus) ~ NA,
+      !is.na(Genus) & is.na(Species) ~ paste(Genus, " sp.", sep = ""),
+      !is.na(Genus) & !is.na(Species) ~ paste(Genus, " ", Species, sep = "")
+    )) %>% # rewrite full species name
+    dplyr::select(-c("Genus_addSp", "Species", "Species_addSp")) %>%
+    dplyr::rename(Species = Species_full) %>%
+    relocate(Species, .before = "Strain") %>% 
+    mutate(inferred_from = if_else(is.na(Cluster), "assignTaxonomy", "addSpecies_custom")) %>%
+    arrange(Species)
+  
+  cat(paste0("Matched ", nrow(ASV_taxonomy3[ASV_taxonomy3$inferred_from == "addSpecies_custom", ]), " ASV(s) to reference sequences\n"))
+  
+} else {
+  ASV_taxonomy3 <- as.data.frame(ASV_taxonomy)
+  if (!("Species" %in% colnames(ASV_taxonomy3))){
+    ASV_taxonomy3$Species <- NA
+  }
+  
+  # remove all prefixes (used in gg2)
+  ASV_taxonomy3[,colnames(ASV_taxonomy3)] <- lapply(
+    ASV_taxonomy3[,colnames(ASV_taxonomy3)],
+    gsub,
+    pattern = "d__|p__|c__|o__|f__|g__|s__",
+    replacement = ""
+  )
+  
+  ASV_taxonomy3 <- ASV_taxonomy3 %>%
+    mutate(Species_full = case_when(
+      is.na(Genus) ~ NA,
+      !is.na(Genus) & is.na(Species) ~ paste(Genus, " sp.", sep = ""),
+      !is.na(Genus) & !is.na(Species) ~ paste(Genus, " ", Species, sep = "")
+    )) %>% # rewrite full species name
+    dplyr::select(-c("Species")) %>%
+    dplyr::rename(Species = Species_full) %>%
+    mutate(Strain = NA) %>%
+    mutate(Cluster = NA) %>%
+    mutate(inferred_from = "assignTaxonomy") %>% 
+    arrange(Species)
+}
+
+cat("Finished assigning taxonomy\n")
+
+
+### Reformat species name ###
+
+cat("Reformatting species names\n")
+cat("For ASVs with no assigned genus, the lowest assigned taxonomic rank is used as species name.\n")
+
+ASV_taxonomy4 <- ASV_taxonomy3 %>% 
+  mutate(lowest_assign_taxon = case_when(
+    is.na(Phylum) ~ Kingdom,
+    is.na(Class) ~ Phylum,
+    is.na(Order) ~ Class,
+    is.na(Family) ~ Order,
+    is.na(Genus) ~ Family,
+    is.na(Species) ~ Genus,
+  )) %>%
+  mutate(Species = if_else((Species == "" | is.na(Species)), paste(lowest_assign_taxon, "sp."),Species)) %>% 
+  dplyr::select(-"lowest_assign_taxon")
+
+
+### Create phyloseq object ###
+
+cat("Creating phyloseq object\n")
+
+otu <- otu_table(ASV_samples_table_noChim2, taxa_are_rows=F)
+sdata <- sample_data(meta)
+tax <- tax_table(as.matrix(ASV_taxonomy4))
+
+# check that samples are the same between the metadata file and the ASV table
+check_match <- setdiff(rownames(otu), rownames(sdata))
+
+if (length(check_match) != 0){
+  cat(paste0("Non-matching sample name(s) between the ASV table and the metadata table: ", paste0(check_match, collapse = ","), "\n"))
+}
+
+ps <- phyloseq(otu, 
+               sdata,
+               tax
+)
+
+# save phyloseq object before filtering out ASVs
+saveRDS(object = ps, file = file.path(out.tax, "phyloseq_object_unfiltered.RDS"))
+
+### Remove non-bacterial ASVs if present ###
+
+cat("Filtering out non-bacterial, chloroplast and mitochondrial ASVs\n")
+
+#check for non-bacterial ASVs
+cat(paste0("Represented kingdoms/domains: ", paste0(unique(ASV_taxonomy3$Kingdom), collapse = ", "), "\n"))
+cat(paste0("Represented classes: ", paste0(sort(unique(ASV_taxonomy3$Class)), collapse = ", "), "\n"))
+
+# remove non-bacterial ASVs
+ps <- subset_taxa(ps, Kingdom == "Bacteria" | is.na(Kingdom))
+ps <- subset_taxa(ps, !(Class == "Chloroplast") | is.na(Class))
+ps <- subset_taxa(ps, !(Order == "Chloroplast") | is.na(Order))
+ps <- subset_taxa(ps, !(Family == "Mitochondria") | is.na(Family))
+
+cat(paste0("Found and removed ", length(which(!(ASV_taxonomy3[["Kingdom"]] == "Bacteria"))), " non-bacterial ASV(s)\n"))
+cat(paste0("Found and removed ", length(which(ASV_taxonomy3[["Class"]] == "Chloroplast"))+length(which(ASV_taxonomy3[["Order"]] == "Chloroplast")), " chloroplast ASV(s)\n"))
+cat(paste0("Found and removed ", length(which(ASV_taxonomy3[["Family"]] == "Mitochondria")), " mitochondrial ASV(s)\n"))
+
+# save sequences and give new names to ASVs
+dna <- DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+
+names(dna) <- taxa_names(ps)
+
+# write as fasta
+writeXStringSet(dna, file.path(out.tax, "ASVs_dada2.fasta"))
+
+# write as df with taxonomy
+dna_df <- data.frame(
+  seq = dna
+) %>% 
+  merge(tax_table(ps), by=0) %>% 
+  dplyr::rename(ASV = Row.names)
+
+write.table(dna_df, file.path(out.tax, "ASV_name_tax.tsv"), sep = "\t", col.names = T, row.names = F, quote = F)
+
+saveRDS(object = ps, file = file.path(out.tax, "phyloseq_object_filtered.RDS"))
+
+cat("Finished creating and filtering phyloseq object\n")
+
+### Analyze bootstraps ###
+
+# combine and restructure data
+
+## get bootstraps
+bootstraps <- bootstraps %>% 
+  as.data.frame() %>% 
+  mutate(seq = rownames(bootstraps), .before = "Kingdom")
+bootstraps <- bootstraps %>% 
+  pivot_longer(colnames(bootstraps)[-1], names_to = "rank", values_to = "confidence")
+
+## get labels
+ASV_taxonomy3_long <- ASV_taxonomy3 %>% 
+  as.data.frame() %>% 
+  mutate(seq = rownames(ASV_taxonomy3), .before = "Kingdom")
+ASV_taxonomy3_long <- ASV_taxonomy3_long %>% 
+  pivot_longer(colnames(ASV_taxonomy3_long)[-1], names_to = "rank", values_to = "label")
+
+## combine data
+bootstraps <- bootstraps %>% 
+  left_join(ASV_taxonomy3_long, by = c("seq", "rank")) %>% # add ASV name if relevant
+  left_join(dna_df[ ,c("ASV", "seq")], by = "seq") %>% 
+  relocate(ASV, .after = "seq")
+
+bootstraps$rank <- factor(bootstraps$rank, levels=rank_names, ordered = T)
+
+## plot confidence per rank
+confidence_plot <- ggplot(
+  bootstraps,
+  aes(
+    x = rank,
+    y = confidence
+  )
+) +
+  geom_hline(yintercept = 80, linetype = 2, linewidth = 0.4, color = "#428500") +
+  geom_hline(yintercept = 50, linetype = 2, linewidth = 0.4, color = "#E8B823") +
+  geom_hline(yintercept = 30, linetype = 2, linewidth = 0.4, color = "#961200") +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(alpha = 0.3, size = 2, width = 0.2, height = 0.1) +
+  scale_y_continuous(breaks = seq(0,100,20), limits = c(0,105), expand=c(0,0)) +
+  labs(
+    x = "Rank",
+    y = "Confidence (%)"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+#confidence_plot
+
+## save plot
+ggsave(
+  file.path(out.plots, paste0("05_ASV_taxonomy_confidence.pdf")),
+  confidence_plot,
+  device="pdf",
+  width = 6,
+  height = 5
+)
+## save data
+write.table(
+  bootstraps,
+  file.path(out.tax, "rdp_bootstraps.tsv"),
+  sep = "\t",
+  quote = F,
+  col.names = T,
+  row.names = F
+)
+
+### Create a single abundance table ###
+
+abundance_table_long <- psmelt(ps) %>% 
+  select(-"Sample") %>% 
+  dplyr::rename(
+    ASV = OTU,
+    read_count = Abundance
+  ) %>%
+  arrange(SampleID, ASV)
+
+write.table(abundance_table_long, file.path(out.tax, "sample_ASV_table_long.tsv"), sep = "\t", quote = F, col.names = T, row.names = F)
+
+### Compute ASV total abundance and prevalence ###
+
+cat("Computing ASV total abundance and prevalence\n")
+
+df_ab <- abundance_table_long %>% 
+  group_by(!!!syms(intersect(rank_names, colnames(abundance_table_long)))) %>% 
+  summarize(
+    prevalence = 100*sum(read_count > 0)/length(unique(abundance_table_long$SampleID)),
+    total_read_count = sum(read_count),
+    avg_read_count = mean(read_count)
+  )
+  
+# plot
+if (db2 != ""){
+  # color ASVs exactly matching references
+  df_ab2 <- df_ab %>% 
+    mutate(Genus_label = if_else(!is.na(Cluster),Genus,NA))
+  
+  asv_stats <- ggplot(
+    df_ab2,
+    aes(
+      x = total_read_count,
+      y = prevalence,
+      color = Genus_label
+    )) +
+    geom_point(alpha = 0.5) +
+    scale_x_log10(breaks = 10^c(0:7)) +
+    scale_y_continuous(limits = c(0,100), breaks = seq(0,100,20)) +
+    labs(
+      x = "Total abundance (reads)",
+      y = "Prevalence (%)",
+      color = "Genus (only exact matches)"
+    ) +
+    theme_bw() +
+    theme(
+      legend.position = "right",
+      panel.grid = element_blank()
+    )
+  
+  ggsave(file.path(out.plots, "05_ASV_abundance_prevalence.pdf"), asv_stats, device="pdf", width = 6, height = 4)
+
+} else {
+  asv_stats <- ggplot(
+    df_ab,
+    aes(
+      x = total_read_count,
+      y = prevalence
+    )) +
+    geom_point(alpha = 0.5) +
+    scale_x_log10(breaks = 10^c(0:7)) +
+    scale_y_continuous(limits = c(0,100), breaks = seq(0,100,20)) +
+    labs(
+      x = "Total abundance (reads)",
+      y = "Prevalence (%)"
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid = element_blank()
+    )
+  
+  ggsave(file.path(out.plots, "05_ASV_abundance_prevalence.pdf"), asv_stats, device="pdf", width = 4, height = 4)
+}
+
+### Final report of number of reads ###
+
+# compute number of reads
+counts <- abundance_table_long %>%
+  group_by(SampleID) %>%
+  summarize(n_reads = sum(read_count)) %>%
+  dplyr::rename(sample = SampleID) %>% 
+  mutate(
+    stage = "AssignTaxonomy",
+    basename = paste(sample, ".fastq.gz", sep = "")
+    ) %>% 
+  rbind(reads_df)
+counts <- counts[ ,c("basename", "sample", "stage", "n_reads")]
+rownames(counts) <- c(1:nrow(counts))
+counts$stage <- factor(
+  counts$stage,
+  levels = c("Input", "Primers removed", "Post processing", "Denoising", "Chimera removal", "AssignTaxonomy"),
+  ordered = T
+)
+
+counts2 <- counts %>% 
+  arrange(stage) %>%
+  pivot_wider(names_from = "stage", values_from = "n_reads") %>% 
+  dplyr::rename(SampleID = sample) %>% 
+  left_join(meta, by = "SampleID")
+
+write.table(counts2, file.path(out.tax, "read_count_wide.tsv"), sep = "\t", quote = F, col.names = T, row.names = F)
+
+### Plotting most abundant taxa ###
+
+cat("\nPlotting most abundant taxa\n")
+
+top_nested <- nested_top_taxa(
+  ps,
+  top_tax_level = "Genus", # most abundant order
+  nested_tax_level = "Species", # most abundant genera within those orders
+  n_top_taxa = 8, # top 8 most abundant genera
+  n_nested_taxa = 2 # top 2 most abundant species
+)
+
+tax_plot <- plot_nested_bar(ps_obj = top_nested$ps_obj, 
+                            top_level = "Genus", nested_level = "Species",
+                            legend_title = "Taxonomy") + 
+  theme_nested(theme_classic) + ylab("Relative abundance") + 
+  theme(
+    #strip.text.x = element_text(angle=90),
+    strip.background=element_blank(),
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    legend.key.size = unit(0.4, "cm")
+  ) + 
+  guides(fill=guide_legend(ncol =1))
+
+if (facet_var[1] != ""){
+  tax_plot <- tax_plot + facet_wrap(formula(paste0("~ ", paste(facet_var, collapse = "+"))), drop=T, scales = "free")
+}
+
+ggsave(file.path(out.plots, "05_taxonomy_barplot.pdf"), tax_plot, device="pdf", width = 8, height = 6)
+
+cat("Taxonomy assignment done\n")

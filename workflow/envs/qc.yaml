@@ -1,0 +1,16 @@
+name: qc
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - fastqc
+  - multiqc
+  - pip:
+      - boto3
+      - botocore
+      - jmespath
+      - pyarrow
+      - python-dateutil
+      - s3transfer
+      - six
+      - importlib-metadata
